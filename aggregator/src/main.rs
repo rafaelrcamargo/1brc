@@ -1,12 +1,20 @@
+#![feature(bufread_skip_until)]
+
 use memmap2::MmapOptions;
+use rayon::prelude::*;
 use std::{
     collections::HashMap,
     fs::File,
-    io::{self, Write}
+    io::{self, BufRead, BufWriter, Cursor, Write},
+    sync::{Arc, Mutex},
+    thread,
+    time::Instant
 };
+use threadpool::ThreadPool;
 
-const PAGE_SIZE: usize = 3250;
+const CHUNK_SIZE: usize = 1 << 20;
 
+#[derive(Clone)]
 struct Measurement {
     min: f32,
     max: f32,
@@ -35,52 +43,111 @@ impl Measurement {
 }
 
 fn main() {
-    // let cores: usize = thread::available_parallelism().unwrap().into();
-    // println!("Available cores: {}", cores);
+    let now = Instant::now();
 
-    let mut accumulator: HashMap<String, Measurement> = HashMap::new();
+    let threads: usize = thread::available_parallelism().unwrap().into();
 
-    let file = File::open("assets/measurements-1000000000.txt").unwrap();
-    let mmap = unsafe { MmapOptions::new().map(&file).unwrap() };
-    let total = mmap.len();
+    let file = unsafe {
+        MmapOptions::new()
+            .map(&File::open("data/measurements-1000000000.txt").unwrap())
+            .unwrap()
+    };
 
-    let mut read = 0;
+    let file_len = file.len();
+    let file_arc = Arc::new(file);
 
-    while read < total {
-        let range = read + (if read + PAGE_SIZE <= total { PAGE_SIZE } else { total - read });
-        let chunk = String::from_utf8_lossy(&mmap[read..range]);
+    let pool = ThreadPool::new(threads);
 
-        if let Some(pos) = chunk.rfind('\n') {
-            chunk[..pos].split('\n').for_each(|line| {
-                let mut parts = line.split(';');
-                let location = parts.next().unwrap().to_string();
-                let temperature = parts.next().unwrap().parse().unwrap();
+    let results = Arc::new(Mutex::new(Vec::new()));
 
-                accumulator
-                    .entry(location)
-                    .and_modify(|measurement| measurement.update(temperature))
-                    .or_insert(Measurement::new(temperature));
-            });
+    for i in 0..file_len.div_ceil(CHUNK_SIZE) {
+        let start = i * CHUNK_SIZE;
+        let end = if start + CHUNK_SIZE > file_len { file_len } else { start + CHUNK_SIZE };
 
-            read += pos + 1;
+        let file_local = file_arc.clone();
+        let results_local = results.clone();
+
+        pool.execute(move || {
+            let mut local_map: HashMap<String, Measurement> = HashMap::new();
+            let mut reader = Cursor::new(&file_local[start..end]);
+
+            if i > 0 {
+                reader.skip_until(b'\n').unwrap();
+            }
+
+            let mut buffer = String::new();
+            while let Ok(bytes_read) = reader.read_line(&mut buffer) {
+                if bytes_read == 0 {
+                    break;
+                }
+
+                let parts: Vec<&str> = buffer.trim_end().split(';').collect();
+                if let (Some(location), Ok(temperature)) = (parts.get(0), parts.get(1).unwrap_or(&"").parse::<f32>()) {
+                    local_map
+                        .entry(location.to_string())
+                        .and_modify(|e| e.update(temperature))
+                        .or_insert_with(|| Measurement::new(temperature));
+                }
+
+                buffer.clear();
+            }
+
+            results_local.clone().lock().unwrap().push(local_map)
+        });
+    }
+
+    pool.join();
+
+    let mut global_map: HashMap<String, Measurement> = HashMap::new();
+    let results = results.lock().unwrap();
+
+    for local_map in results.iter() {
+        for (city, stats) in local_map {
+            global_map
+                .entry(city.to_owned())
+                .and_modify(|e| {
+                    e.total += stats.total;
+                    e.count += stats.count;
+                    e.min = e.min.min(stats.min);
+                    e.max = e.max.max(stats.max);
+                })
+                .or_insert_with(|| stats.clone());
         }
     }
 
-    let mut stdout = io::stdout().lock();
+    // Sort and print results
+    let cities: Vec<_> = global_map.iter().collect();
+
+    let mut stdout = BufWriter::new(io::stdout().lock());
+
     stdout.write_all(b"{").unwrap();
-    accumulator.iter().for_each(|(location, measurement)| {
-        stdout
-            .write_all(
-                format!(
-                    "{}={}/{:.1}/{}, ",
-                    location,
-                    measurement.min,
-                    measurement.mean(),
-                    measurement.max
-                )
-                .as_bytes()
-            )
-            .unwrap();
-    });
+    stdout
+        .write_all(
+            cities
+                .iter()
+                .collect::<Vec<_>>()
+                .par_iter()
+                .map(|(location, temperature)| {
+                    format!(
+                        "{}={}/{:.1}/{}, ",
+                        location,
+                        temperature.min,
+                        temperature.mean(),
+                        temperature.max
+                    )
+                    .as_bytes()
+                    .to_owned()
+                })
+                .collect::<Vec<_>>()
+                .concat()
+                .as_slice()
+        )
+        .unwrap();
     stdout.write_all(b"}\n").unwrap();
+
+    stdout
+        .write_all(format!("\nTotal execution time is: {:?}\n", now.elapsed()).as_bytes())
+        .unwrap();
+
+    stdout.flush().unwrap();
 }

@@ -1,4 +1,4 @@
-use rand::seq::SliceRandom;
+use rand::{rngs::ThreadRng, seq::SliceRandom};
 use rand_distr::{Distribution, Normal};
 use rayon::prelude::*;
 use std::{
@@ -424,46 +424,49 @@ const STATIONS: [(&str, f32); 413] = [
     ("Zürich", 9.3)
 ];
 
-fn generate_temperature(mean_temperature: f32) -> f32 {
-    let normal = Normal::new(mean_temperature, 10.0).unwrap();
-    let mut rng = rand::thread_rng();
-    let m = normal.sample(&mut rng);
-    (m * 10.0).round() / 10.0
+fn generate_temperature(rng: &mut ThreadRng, mean_temperature: f32) -> f32 {
+    Normal::new(mean_temperature, 10.0).unwrap().sample(rng)
 }
 
 fn generate_measurements(lines: usize, cities: [(&str, f32); 413]) {
-    let file = File::create(format!("assets/measurements-{}.txt", lines)).expect("Unable to create file");
-    let shared_writer = Arc::new(Mutex::new(BufWriter::new(file)));
+    let file = File::create(format!("data/measurements-{}.txt", lines)).expect("Unable to create file");
+    let writer = Arc::new(Mutex::new(BufWriter::new(file)));
 
-    (0..(lines / 10000)).into_par_iter().for_each(|_| {
-        let lines = (0..10000)
+    (0..(lines / 100000)).into_par_iter().for_each(|_| {
+        let lines = (0..100000)
             .into_par_iter()
             .map(|_| {
                 let mut rng = rand::thread_rng();
                 let city = cities.choose(&mut rng).unwrap();
-                format!("{};{:.1}\n", city.0, generate_temperature(city.1))
+
+                format!("{};{:.1}\n", city.0, generate_temperature(&mut rng, city.1))
                     .as_bytes()
                     .to_owned()
             })
-            .collect::<Vec<Vec<u8>>>();
-
-        let writer = Arc::clone(&shared_writer);
+            .collect::<Vec<Vec<u8>>>()
+            .concat();
 
         writer
             .lock()
             .unwrap()
-            .write_all(lines.concat().as_slice())
+            .write_all(&lines)
             .expect("Unable to write to file");
     });
+
+    writer
+        .lock()
+        .unwrap()
+        .flush()
+        .expect("Unable to flush file");
 }
 
 fn main() {
-    fs::create_dir_all("assets").expect("Unable to create directory");
+    fs::create_dir_all("data").expect("Unable to create directory");
 
     let now = Instant::now();
     println!("Generating measurements...\n");
 
-    for lines in [10000, 100000, 1000000, 10000000, 100000000, 1000000000].iter() {
+    for lines in [100000, 1000000, 10000000, 100000000, 1000000000].iter() {
         let now = Instant::now();
 
         {
