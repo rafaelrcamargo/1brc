@@ -3,6 +3,10 @@ resolver = "2"
 
 members = ["aggregator", "generator"]
 
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [profile.release]
 debug = false
 lto = "fat"
