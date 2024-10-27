@@ -11,23 +11,40 @@ use std::{
 };
 
 fn generate_temperature(rng: &mut ThreadRng, mean_temperature: f32) -> f32 {
-    Normal::new(mean_temperature, 10.0).unwrap().sample(rng)
+    (Normal::new(mean_temperature, 10.0).unwrap().sample(rng) * 10.0).round() / 10.0
 }
 
 fn generate_measurements<const N: usize>(lines: usize, cities: [(&str, f32); N]) {
     let file = File::create(format!("data/measurements-{}.txt", lines)).expect("Unable to create file");
     let writer = Arc::new(Mutex::new(BufWriter::new(file)));
 
-    (0..(lines / 100000)).into_par_iter().for_each(|_| {
-        let lines = (0..100000)
+    (0..(lines / 100_000)).into_par_iter().for_each(|_| {
+        let lines = (0..100_000)
             .into_par_iter()
             .map(|_| {
                 let mut rng = rand::thread_rng();
                 let city = cities.choose(&mut rng).unwrap();
 
-                format!("{};{:.1}\n", city.0, generate_temperature(&mut rng, city.1))
-                    .as_bytes()
-                    .to_owned()
+                let mut buffer: [u8; 33] = [0u8; 33];
+
+                let city_bytes = city.0.as_bytes();
+                buffer[..city_bytes.len()].copy_from_slice(city_bytes);
+                let mut pos = city_bytes.len();
+
+                buffer[pos] = b';';
+                pos += 1;
+
+                let mut buf = dtoa::Buffer::new();
+                let temperature = buf
+                    .format_finite(generate_temperature(&mut rng, city.1))
+                    .as_bytes();
+                buffer[pos..pos + temperature.len()].copy_from_slice(temperature);
+                pos += temperature.len();
+
+                buffer[pos] = b'\n';
+                pos += 1;
+
+                buffer[..pos].to_owned()
             })
             .collect::<Vec<Vec<u8>>>()
             .concat();
@@ -52,7 +69,7 @@ fn main() {
     let now = Instant::now();
     println!("Generating measurements...\n");
 
-    for lines in [100000, 1000000, 10000000, 100000000, 1000000000].iter() {
+    for lines in [100_000, 1_000_000, 10_000_000, 100_000_000, 1_000_000_000].iter() {
         let now = Instant::now();
 
         generate_measurements(*lines, dataset::CITIES);
