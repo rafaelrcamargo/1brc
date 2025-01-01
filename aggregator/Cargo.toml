@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+fast-float = "0.2.0"
 memmap2 = "0.9.4"
 rayon = "1.10.0"
+ryu = "1.0.18"
 threadpool = "1.8.1"

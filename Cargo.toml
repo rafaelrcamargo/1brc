@@ -3,6 +3,9 @@ resolver = "2"
 
 members = ["aggregator", "generator"]
 
+[profile.dev]
+panic = "abort"
+
 [profile.profiling]
 inherits = "release"
 debug = true

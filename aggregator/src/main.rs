@@ -1,14 +1,10 @@
-#![feature(bufread_skip_until)]
-
 use memmap2::MmapOptions;
-use rayon::prelude::*;
 use std::{
     collections::HashMap,
     fs::File,
     io::{self, BufRead, BufWriter, Cursor, Write},
     sync::{Arc, Mutex},
-    thread,
-    time::Instant
+    thread
 };
 use threadpool::ThreadPool;
 
@@ -21,7 +17,6 @@ struct Measurement {
     total: f32,
     count: usize
 }
-
 impl Measurement {
     fn new(temperature: f32) -> Self {
         Self {
@@ -39,11 +34,11 @@ impl Measurement {
         self.count += 1;
     }
 
-    fn mean(&self) -> f32 { self.total / self.count as f32 }
+    fn mean(&self) -> f32 { ((self.total / self.count as f32) * 10.0).round() / 10.0 }
 }
 
 fn main() {
-    let now = Instant::now();
+    // let now = Instant::now();
 
     let threads: usize = thread::available_parallelism().unwrap().into();
 
@@ -60,20 +55,29 @@ fn main() {
 
     let results = Arc::new(Mutex::new(Vec::new()));
 
-    for i in 0..file_len.div_ceil(CHUNK_SIZE) {
-        let start = i * CHUNK_SIZE;
-        let end = if start + CHUNK_SIZE > file_len { file_len } else { start + CHUNK_SIZE };
+    let mut current_pos = 0;
+    while current_pos < file_len {
+        let end = if current_pos + CHUNK_SIZE > file_len { file_len } else { current_pos + CHUNK_SIZE };
+
+        // Look ahead for a newline if we're not at the end of file
+        let mut chunk_end = end;
+        if end < file_len {
+            // Find the next newline after the chunk boundary
+            let next_chunk = &file_arc[end..std::cmp::min(end + 48, file_len)];
+            if let Some(newline_pos) = next_chunk.iter().position(|&b| b == b'\n') {
+                chunk_end = end + newline_pos + 1; // Include the newline
+            }
+        }
 
         let file_local = file_arc.clone();
         let results_local = results.clone();
 
+        let start = current_pos;
+        let end = chunk_end;
+
         pool.execute(move || {
             let mut local_map: HashMap<String, Measurement> = HashMap::new();
             let mut reader = Cursor::new(&file_local[start..end]);
-
-            if i > 0 {
-                reader.skip_until(b'\n').unwrap();
-            }
 
             let mut buffer = String::new();
             while let Ok(bytes_read) = reader.read_line(&mut buffer) {
@@ -82,7 +86,8 @@ fn main() {
                 }
 
                 let parts: Vec<&str> = buffer.trim_end().split(';').collect();
-                if let (Some(location), Ok(temperature)) = (parts.get(0), parts.get(1).unwrap_or(&"").parse::<f32>()) {
+
+                if let (Some(location), Ok(temperature)) = (parts.get(0), fast_float::parse(parts.get(1).unwrap())) {
                     local_map
                         .entry(location.to_string())
                         .and_modify(|e| e.update(temperature))
@@ -92,10 +97,11 @@ fn main() {
                 buffer.clear();
             }
 
-            results_local.clone().lock().unwrap().push(local_map)
+            results_local.lock().unwrap().push(local_map)
         });
-    }
 
+        current_pos = chunk_end;
+    }
     pool.join();
 
     let mut global_map: HashMap<String, Measurement> = HashMap::new();
@@ -115,39 +121,51 @@ fn main() {
         }
     }
 
-    // Sort and print results
-    let cities: Vec<_> = global_map.iter().collect();
+    // Sort the results
+    let mut cities: Vec<_> = global_map.iter().collect();
+    cities.sort_by(|a, b| a.0.cmp(b.0));
 
+    // Print the results
     let mut stdout = BufWriter::new(io::stdout().lock());
+    cities.iter().for_each(|(location, temperature)| {
+        let mut buffer: [u8; 48] = [0u8; 48];
 
-    stdout.write_all(b"{").unwrap();
-    stdout
-        .write_all(
-            cities
-                .iter()
-                .collect::<Vec<_>>()
-                .par_iter()
-                .map(|(location, temperature)| {
-                    format!(
-                        "{}={}/{:.1}/{}, ",
-                        location,
-                        temperature.min,
-                        temperature.mean(),
-                        temperature.max
-                    )
-                    .as_bytes()
-                    .to_owned()
-                })
-                .collect::<Vec<_>>()
-                .concat()
-                .as_slice()
-        )
-        .unwrap();
-    stdout.write_all(b"}\n").unwrap();
+        let location_bytes = location.as_bytes();
+        buffer[..location_bytes.len()].copy_from_slice(location_bytes);
+        let mut pos = location_bytes.len();
 
-    stdout
-        .write_all(format!("\nTotal execution time is: {:?}\n", now.elapsed()).as_bytes())
-        .unwrap();
+        buffer[pos] = b'=';
+        pos += 1;
 
+        let mut buf = ryu::Buffer::new();
+        let min = buf.format_finite(temperature.min);
+        buffer[pos..pos + min.len()].copy_from_slice(min.as_bytes());
+        pos += min.len();
+
+        buffer[pos] = b'/';
+        pos += 1;
+
+        let mean = buf.format_finite(temperature.mean());
+        buffer[pos..pos + mean.len()].copy_from_slice(mean.as_bytes());
+        pos += mean.len();
+
+        buffer[pos] = b'/';
+        pos += 1;
+
+        let max = buf.format_finite(temperature.max);
+        buffer[pos..pos + max.len()].copy_from_slice(max.as_bytes());
+        pos += max.len();
+
+        buffer[pos] = b',';
+        pos += 1;
+
+        stdout.write_all(&buffer[..pos]).unwrap();
+    });
+
+    // Ensure the writter is flushed
     stdout.flush().unwrap();
+
+    // stdout
+    //     .write_all(format!("\nTotal execution time is: {:?}\n", now.elapsed()).as_bytes())
+    //     .unwrap();
 }

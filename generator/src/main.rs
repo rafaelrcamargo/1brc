@@ -11,7 +11,7 @@ use std::{
 };
 
 fn generate_temperature(rng: &mut ThreadRng, mean_temperature: f32) -> f32 {
-    (Normal::new(mean_temperature, 10.0).unwrap().sample(rng) * 10.0).round() / 10.0
+    (Normal::new(mean_temperature, 2.0).unwrap().sample(rng) * 10.0).round() / 10.0
 }
 
 fn generate_measurements<const N: usize>(lines: usize, cities: [(&str, f32); N]) {
@@ -34,7 +34,7 @@ fn generate_measurements<const N: usize>(lines: usize, cities: [(&str, f32); N])
                 buffer[pos] = b';';
                 pos += 1;
 
-                let mut buf = dtoa::Buffer::new();
+                let mut buf = ryu::Buffer::new();
                 let temperature = buf
                     .format_finite(generate_temperature(&mut rng, city.1))
                     .as_bytes();
